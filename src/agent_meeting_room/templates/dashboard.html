@@ -1,0 +1,210 @@
+{% extends 'base.html' %}
+{% set title = '会议室' %}
+{% block content %}
+  <section class="workspace-grid">
+    <aside class="panel room-sidebar">
+      <div class="card">
+        <h3>会议室列表</h3>
+        <div class="room-list">
+          {% for room in rooms %}
+            <a class="room-link {% if room.room_id == active_room_id %}room-link-active{% endif %}" href="{{ url_for('dashboard', room_id=room.room_id) }}">
+              <strong>{{ room.room_name }}</strong>
+              <span>{{ room.status.value }} · {{ room.phase.value }}</span>
+            </a>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>新建会议室</h3>
+        <form method="post" action="{{ url_for('create_room') }}" class="stack-form">
+          <label>会议室名称</label>
+          <input type="text" name="room_name" placeholder="例如：脚本联调室" required>
+          <label>会议目标</label>
+          <textarea name="goal" rows="4" placeholder="说明这个会议室要完成什么目标" required></textarea>
+          <button type="submit">创建会议室</button>
+        </form>
+      </div>
+
+      <div class="card participant-card">
+        <div class="card-header">
+          <h3>角色列表</h3>
+          <a class="link-button" href="{{ url_for('new_role', room_id=state.room_id) }}">新增角色</a>
+        </div>
+        <div class="participant-list">
+          {% for participant in state.participants %}
+            <a class="participant-item participant-link" href="{{ url_for('edit_role', room_id=state.room_id, participant_id=participant.participant_id) }}">
+              <strong>{{ participant.name }}</strong>
+              <span>{{ participant.role }} · {{ participant.participant_type.value }}</span>
+              <small>工具：{{ participant.tools | join('、') if participant.tools else '未配置' }}</small>
+            </a>
+          {% endfor %}
+        </div>
+      </div>
+    </aside>
+
+    <main class="panel conversation-main" id="conversation">
+      <section class="hero-card hero-room">
+        <div>
+          <p class="eyebrow">当前会议室</p>
+          <h2>{{ state.room_name }}</h2>
+          <p class="hero-text">{{ state.goal }}</p>
+        </div>
+        <div class="hero-actions">
+          <span class="phase-pill">阶段：{{ state.phase.value }}</span>
+          <span class="phase-pill">状态：{{ state.status.value }}</span>
+        </div>
+      </section>
+
+      <section class="card room-config-card">
+        <div class="split-header">
+          <h3>会议室配置</h3>
+          <form method="post" action="{{ url_for('update_room_status', room_id=state.room_id) }}" class="inline-form compact-form">
+            <button type="submit" name="status" value="active">继续讨论</button>
+            <button type="submit" name="status" value="paused" class="secondary-button">暂停讨论</button>
+            <button type="submit" name="status" value="stopped" class="danger-button">停止讨论</button>
+          </form>
+        </div>
+        <form method="post" action="{{ url_for('update_room', room_id=state.room_id) }}" class="stack-form">
+          <label>会议室名称</label>
+          <input type="text" name="room_name" value="{{ state.room_name }}" required>
+          <label>目标</label>
+          <textarea name="goal" rows="3" required>{{ state.goal }}</textarea>
+          <button type="submit">更新会议室</button>
+        </form>
+      </section>
+
+      <section class="card conversation-card">
+        <div class="card-header">
+          <h3>会话时间线</h3>
+          <form method="post" action="{{ url_for('trigger_ai', room_id=state.room_id) }}">
+            <button type="submit" class="secondary-button">手动触发 Agent 思考</button>
+          </form>
+        </div>
+        <div class="message-list message-list-large">
+          {% for message in state.messages %}
+            <article class="message message-{{ message.kind.value }}">
+              <div class="message-meta">
+                <strong>{{ message.sender_name }}</strong>
+                <span>{{ message.sender_role }}</span>
+                <time>{{ message.created_at.strftime('%Y-%m-%d %H:%M:%S') }}</time>
+              </div>
+              <p>{{ message.content }}</p>
+            </article>
+          {% else %}
+            <p class="empty-tip">还没有会话，主持人可以先发起需求或任务。</p>
+          {% endfor %}
+        </div>
+      </section>
+
+      <section class="card composer-card">
+        <h3>发送消息</h3>
+        <form method="post" action="{{ url_for('send_message', room_id=state.room_id) }}" class="stack-form">
+          <label>发送者</label>
+          <select name="sender_id" required>
+            {% for participant in state.participants %}
+              <option value="{{ participant.participant_id }}">{{ participant.name }} · {{ participant.role }}</option>
+            {% endfor %}
+          </select>
+          <label>内容</label>
+          <textarea name="content" rows="10" class="prompt-textarea" placeholder="输入需求、问题、停止讨论、暂停讨论、恢复讨论，或者让某个角色开始执行具体工作" required></textarea>
+          <label class="checkbox-row"><input type="checkbox" name="auto_ai" checked> 有人发言后自动触发相关 Agent 思考</label>
+          <button type="submit">发送消息</button>
+        </form>
+      </section>
+    </main>
+
+    <aside class="panel stack-panel right-sidebar">
+      <div class="card" id="tasks">
+        <h3>任务面板</h3>
+        <div class="task-list">
+          {% for task in state.tasks %}
+            <article class="task-item">
+              <div class="task-head">
+                <strong>{{ task.title }}</strong>
+                <span class="status-badge">{{ task.status.value }}</span>
+              </div>
+              <p>{{ task.description or '暂无描述' }}</p>
+              <small>负责人：{{ task.owner_name }}</small>
+              <small>验收标准：{{ task.acceptance_criteria or '未填写' }}</small>
+              <form method="post" action="{{ url_for('update_task_status', room_id=state.room_id, task_id=task.task_id) }}" class="inline-form">
+                <select name="status">
+                  {% for status in task_statuses %}
+                    <option value="{{ status.value }}" {% if status == task.status %}selected{% endif %}>{{ status.value }}</option>
+                  {% endfor %}
+                </select>
+                <button type="submit">更新</button>
+              </form>
+            </article>
+          {% else %}
+            <p class="empty-tip">还没有任务，先由主持人或架构师拆分目标。</p>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>创建任务</h3>
+        <form method="post" action="{{ url_for('add_task', room_id=state.room_id) }}" class="stack-form">
+          <label>标题</label>
+          <input type="text" name="title" required>
+          <label>负责人</label>
+          <select name="owner_id" required>
+            {% for participant in state.participants %}
+              <option value="{{ participant.participant_id }}">{{ participant.name }}</option>
+            {% endfor %}
+          </select>
+          <label>描述</label>
+          <textarea name="description" rows="3"></textarea>
+          <label>验收标准</label>
+          <textarea name="acceptance_criteria" rows="3"></textarea>
+          <button type="submit">创建任务</button>
+        </form>
+      </div>
+
+      <div class="card" id="review">
+        <h3>评审与收口</h3>
+        <form method="post" action="{{ url_for('review', room_id=state.room_id) }}" class="stack-form">
+          <label>评审人</label>
+          <input type="text" name="reviewer_name" value="主持人" required>
+          <label>评审说明</label>
+          <textarea name="note" rows="5" required></textarea>
+          <div class="button-row">
+            <button type="submit" name="approved" value="true">通过并继续</button>
+            <button type="submit" name="approved" value="false" class="secondary-button">退回修正</button>
+          </div>
+        </form>
+        <div class="decision-list">
+          {% for decision in decisions %}
+            <article class="decision-item">
+              <strong>{{ '通过' if decision.approved else '退回' }}</strong>
+              <span>{{ decision.reviewer_name }}</span>
+              <p>{{ decision.note }}</p>
+            </article>
+          {% endfor %}
+        </div>
+      </div>
+
+      <div class="card" id="memories">
+        <h3>长期记忆</h3>
+        <form method="post" action="{{ url_for('add_memory', room_id=state.room_id) }}" class="stack-form">
+          <label>标题</label>
+          <input type="text" name="title" required>
+          <label>内容</label>
+          <textarea name="content" rows="4" required></textarea>
+          <label>标签</label>
+          <input type="text" name="tags" placeholder="例如：需求,测试,结论">
+          <button type="submit">保存记忆</button>
+        </form>
+        <div class="memory-list">
+          {% for memory in memories %}
+            <article class="memory-item">
+              <strong>{{ memory.title }}</strong>
+              <span>{{ memory.tags }}</span>
+              <p>{{ memory.content }}</p>
+            </article>
+          {% endfor %}
+        </div>
+      </div>
+    </aside>
+  </section>
+{% endblock %}

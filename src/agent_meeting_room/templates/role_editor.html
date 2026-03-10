@@ -1,0 +1,67 @@
+{% extends 'base.html' %}
+{% set title = '角色配置' %}
+{% block content %}
+  <section class="settings-grid role-editor-grid">
+    <div class="card settings-card">
+      <div class="card-header">
+        <h2>{{ '新增角色' if is_new else '编辑角色' }}</h2>
+        <a class="link-button" href="{{ url_for('dashboard', room_id=active_room_id) }}">返回会议室</a>
+      </div>
+      <form method="post" action="{{ url_for('save_role', room_id=active_room_id) }}" class="stack-form">
+        <input type="hidden" name="participant_id" value="{{ participant.participant_id }}">
+        <label>名称</label>
+        <input type="text" name="name" value="{{ participant.name }}" required>
+        <label>角色名称</label>
+        <input type="text" name="role" value="{{ participant.role }}" required>
+        <label>类型</label>
+        <div class="radio-row">
+          <label><input type="radio" name="participant_type" value="human" {% if participant.participant_type.value == 'human' %}checked{% endif %}> 真人</label>
+          <label><input type="radio" name="participant_type" value="ai" {% if participant.participant_type.value == 'ai' %}checked{% endif %}> AI Agent</label>
+        </div>
+        <label>描述</label>
+        <textarea name="description" rows="4">{{ participant.description }}</textarea>
+        <label>绑定模型</label>
+        <select name="llm_profile_id">
+          <option value="">默认模型</option>
+          {% for profile in llm_profiles %}
+            <option value="{{ profile.profile_id }}" {% if profile.profile_id == participant.llm_profile_id %}selected{% endif %}>{{ profile.profile_id }} · {{ profile.name }}</option>
+          {% endfor %}
+        </select>
+        <label>工具选择</label>
+        <div class="tool-grid">
+          {% for tool in tools %}
+            <label class="tool-option">
+              <input type="checkbox" name="tools" value="{{ tool.tool_id }}" {% if tool.tool_id in participant.tools %}checked{% endif %}>
+              <span>
+                <strong>{{ tool.name }}</strong>
+                <small>{{ tool.description }}</small>
+              </span>
+            </label>
+          {% endfor %}
+        </div>
+        <label>角色提示词</label>
+        <textarea name="system_prompt" rows="14" class="prompt-textarea">{{ participant.system_prompt }}</textarea>
+        <label class="checkbox-row"><input type="checkbox" name="enabled" {% if participant.enabled or is_new %}checked{% endif %}> 启用角色</label>
+        <button type="submit">保存角色配置</button>
+      </form>
+    </div>
+
+    <div class="card settings-card">
+      <h2>配置建议</h2>
+      <div class="memory-list">
+        <article class="memory-item">
+          <strong>主持人</strong>
+          <p>主持人通常设为真人，用于发起需求、暂停讨论、恢复讨论和停止讨论。</p>
+        </article>
+        <article class="memory-item">
+          <strong>工具多选</strong>
+          <p>角色只需要持有与自己职责相关的工具，工具太多会让回复变得发散。</p>
+        </article>
+        <article class="memory-item">
+          <strong>提示词</strong>
+          <p>提示词建议写清楚：什么时候应该回复、什么时候不回复、产物格式、质量标准和边界条件。</p>
+        </article>
+      </div>
+    </div>
+  </section>
+{% endblock %}
