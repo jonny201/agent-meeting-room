@@ -1,0 +1,17 @@
+[Unit]
+Description=Agent Meeting Room Web Service
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/agent-meeting-room
+EnvironmentFile=-/root/agent-meeting-room/.env
+ExecStart=/root/agent-meeting-room/.venv/bin/python /root/agent-meeting-room/main.py
+Restart=always
+RestartSec=5
+KillSignal=SIGINT
+TimeoutStopSec=30
+
+[Install]
+WantedBy=multi-user.target

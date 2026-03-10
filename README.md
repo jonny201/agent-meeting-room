@@ -26,6 +26,24 @@ Default address:
 
 - http://127.0.0.1:8000
 
+## Linux Systemd Deploy
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+python -m pip install -r requirements.txt
+cp -n .env.example .env
+chmod +x scripts/install_systemd_service.sh
+sudo ./scripts/install_systemd_service.sh
+```
+
+Common service commands:
+
+```bash
+systemctl status agent-meeting-room --no-pager
+journalctl -u agent-meeting-room -f
+```
+
 ## Main Files
 
 - docs/design.md
@@ -44,4 +62,5 @@ Default address:
 
 - Runtime data is stored in data/agent_meeting_room.db.
 - Seed LLM profiles are inserted automatically on first launch.
+- Legacy single-room SQLite databases are automatically backed up with a `.legacy-<timestamp>` suffix before rebuilding the multi-room schema.
 - Before sharing this repository, rotate or remove any sensitive API keys stored in local data.

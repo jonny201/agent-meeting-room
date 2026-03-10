@@ -24,6 +24,9 @@ class Database:
             connection.close()
 
     def initialize(self) -> None:
+        if self._schema_reset_required():
+            self._backup_incompatible_database()
+
         with self.connect() as connection:
             connection.executescript(
                 """
@@ -97,6 +100,47 @@ class Database:
                 );
                 """
             )
+
+    def _schema_reset_required(self) -> bool:
+        if not self.db_path.exists():
+            return False
+
+        connection = sqlite3.connect(self.db_path)
+        try:
+            tables = {
+                row[0]
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()
+            }
+
+            # 旧版本使用 room_meta 和不带 room_id 的单会议室表结构，当前版本无法直接兼容。
+            if "room_meta" in tables and "rooms" not in tables:
+                return True
+
+            required_columns = {
+                "rooms": {"room_id", "room_name", "goal", "phase", "status", "created_at", "updated_at"},
+                "messages": {"room_id", "sender_id", "sender_name", "sender_role", "content", "kind", "created_at"},
+                "tasks": {"room_id", "task_id", "title", "description", "owner_id", "owner_name", "acceptance_criteria", "status", "created_at", "updated_at"},
+                "decisions": {"room_id", "approved", "reviewer_name", "note", "created_at"},
+                "memories": {"room_id", "title", "content", "tags", "source", "created_at", "updated_at"},
+            }
+
+            for table_name, expected_columns in required_columns.items():
+                if table_name not in tables:
+                    continue
+                actual_columns = {
+                    row[1]
+                    for row in connection.execute(f"PRAGMA table_info({table_name})").fetchall()
+                }
+                if not expected_columns.issubset(actual_columns):
+                    return True
+            return False
+        finally:
+            connection.close()
+
+    def _backup_incompatible_database(self) -> None:
+        timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+        backup_path = self.db_path.with_name(f"{self.db_path.stem}.legacy-{timestamp}{self.db_path.suffix}")
+        self.db_path.replace(backup_path)
 
     def get_meta(self, key: str, default: str = "") -> str:
         return default
