@@ -7,6 +7,17 @@
         <h2>{{ '新增角色' if is_new else '编辑角色' }}</h2>
         <a class="link-button" href="{{ url_for('dashboard', room_id=active_room_id) }}">返回会议室</a>
       </div>
+      {% if is_new %}
+        <form method="get" action="{{ url_for('new_role', room_id=active_room_id) }}" class="stack-form role-template-form">
+          <label>角色模板</label>
+          <select name="template_id" onchange="this.form.submit()">
+            <option value="">自定义空白角色</option>
+            {% for template in role_templates %}
+              <option value="{{ template.template_id }}" {% if template.template_id == selected_template_id %}selected{% endif %}>{{ template.name }} · {{ template.description }}</option>
+            {% endfor %}
+          </select>
+        </form>
+      {% endif %}
       <form method="post" action="{{ url_for('save_role', room_id=active_room_id) }}" class="stack-form">
         <input type="hidden" name="participant_id" value="{{ participant.participant_id }}">
         <label>名称</label>
@@ -60,6 +71,10 @@
         <article class="memory-item">
           <strong>提示词</strong>
           <p>提示词建议写清楚：什么时候应该回复、什么时候不回复、产物格式、质量标准和边界条件。</p>
+        </article>
+        <article class="memory-item">
+          <strong>嵌入式 Linux 模板</strong>
+          <p>可直接选择 BSP、应用开发、构建发布、测试验证、日志分析、评审验收等模板，再按项目细节微调。</p>
         </article>
       </div>
     </div>

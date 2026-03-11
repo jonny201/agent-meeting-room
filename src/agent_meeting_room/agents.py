@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .llm_client import LLMClient
 from .models import LLMProfile, MemoryNote, Message, Participant, RoomStatus, TaskItem, TaskStatus
-from .tooling import execute_tools
+from .tooling import ToolExecutionResult, execute_tools
 
 
 @dataclass(slots=True)
@@ -19,7 +19,17 @@ class AgentContext:
     tasks: list[TaskItem]
     recent_messages: list[Message]
     memories: list[MemoryNote]
+    participants: list[Participant]
     workspace_dir: Path
+
+
+@dataclass(slots=True)
+class AgentTurn:
+    reply_text: str
+    next_agent_hint: str | None
+    handoff_reason: str
+    requires_moderator: bool = False
+    tool_outputs: list[ToolExecutionResult] | None = None
 
 
 class BaseAgent:
@@ -29,7 +39,7 @@ class BaseAgent:
     def should_reply(self, context: AgentContext) -> bool:
         raise NotImplementedError
 
-    def generate_reply(self, context: AgentContext) -> str:
+    def plan_turn(self, context: AgentContext) -> AgentTurn:
         raise NotImplementedError
 
 
@@ -45,8 +55,10 @@ class RuleBasedAgent(BaseAgent):
         latest_text = context.latest_message.content.lower()
         role_name = self.participant.role.lower()
         active_tasks = [task for task in context.tasks if task.status not in {TaskStatus.DONE, TaskStatus.APPROVED}]
+        if self.participant.name.lower() in latest_text or self.participant.role.lower() in latest_text:
+            return True
 
-        if any(keyword in latest_text for keyword in ["停止讨论", "暂停讨论"]):
+        if "主持人" in context.latest_message.sender_role and any(keyword in latest_text for keyword in ["停止讨论", "暂停讨论"]):
             return False
         if "主持人" in role_name:
             return False
@@ -54,15 +66,21 @@ class RuleBasedAgent(BaseAgent):
             return any(keyword in latest_text for keyword in ["架构", "设计", "框架", "模块", "方案", "程序"]) or not active_tasks
         if "开发" in role_name:
             return any(keyword in latest_text for keyword in ["代码", "脚本", "实现", "开发", "修复", "接口"])
+        if "驱动" in role_name or "bsp" in role_name:
+            return any(keyword in latest_text for keyword in ["驱动", "bsp", "设备树", "gpio", "uart", "spi", "i2c", "内核"])
+        if "构建" in role_name or "发布" in role_name:
+            return any(keyword in latest_text for keyword in ["构建", "编译", "make", "binary", "发布", "运行"])
         if "测试" in role_name:
             return any(keyword in latest_text for keyword in ["测试", "验证", "运行", "结果", "完成"])
+        if "日志" in role_name:
+            return any(keyword in latest_text for keyword in ["日志", "串口", "报错", "异常", "输出", "dmesg"])
         if "评审" in role_name:
-            return any(keyword in latest_text for keyword in ["评审", "结果", "完成", "通过", "风险"])
+            return any(keyword in latest_text for keyword in ["评审", "结果", "通过", "风险"])
         if "产品" in role_name:
             return any(keyword in latest_text for keyword in ["需求", "验收", "用户", "目标", "流程"])
         return any(keyword in latest_text for keyword in ["问题", "建议", "风险", "下一步"])
 
-    def generate_reply(self, context: AgentContext) -> str:
+    def plan_turn(self, context: AgentContext) -> AgentTurn:
         role_name = self.participant.role.lower()
         latest_text = context.latest_message.content if context.latest_message else ""
         active_tasks = [task for task in context.tasks if task.status not in {TaskStatus.DONE, TaskStatus.APPROVED}]
@@ -70,14 +88,118 @@ class RuleBasedAgent(BaseAgent):
         tool_summary = " ".join(result.summary for result in tool_outputs)
 
         if "架构" in role_name or "architect" in role_name:
-            return self._architect_reply(context.room_goal, latest_text, active_tasks, tool_summary)
-        if "测试" in role_name or "tester" in role_name:
-            return self._tester_reply(latest_text, active_tasks, tool_summary)
-        if "开发" in role_name or "engineer" in role_name or "programmer" in role_name:
-            return self._developer_reply(latest_text, active_tasks, tool_summary)
-        if "评审" in role_name or "review" in role_name:
-            return self._reviewer_reply(active_tasks, tool_summary)
-        return self._expert_reply(context.room_goal, latest_text, active_tasks, tool_summary)
+            reply_text = self._architect_reply(context.room_goal, latest_text, active_tasks, tool_summary)
+        elif "测试" in role_name or "tester" in role_name:
+            reply_text = self._tester_reply(latest_text, active_tasks, tool_summary)
+        elif "开发" in role_name or "engineer" in role_name or "programmer" in role_name:
+            reply_text = self._developer_reply(latest_text, active_tasks, tool_summary)
+        elif "评审" in role_name or "review" in role_name:
+            reply_text = self._reviewer_reply(active_tasks, tool_summary)
+        else:
+            reply_text = self._expert_reply(context.room_goal, latest_text, active_tasks, tool_summary)
+
+        next_hint, handoff_reason, requires_moderator = self._choose_next_agent(context, tool_outputs)
+        handoff_target = "主持人" if requires_moderator else (next_hint or "主持人")
+        reply_text = f"{reply_text}\n\n建议下一位：{handoff_target}。原因：{handoff_reason}"
+        return AgentTurn(
+            reply_text=reply_text,
+            next_agent_hint=next_hint,
+            handoff_reason=handoff_reason,
+            requires_moderator=requires_moderator,
+            tool_outputs=tool_outputs,
+        )
+
+    def _choose_next_agent(
+        self,
+        context: AgentContext,
+        tool_outputs: list[ToolExecutionResult],
+    ) -> tuple[str | None, str, bool]:
+        role_name = self.participant.role.lower()
+        latest_text = context.latest_message.content.lower() if context.latest_message else ""
+        available_roles = [participant.role.lower() for participant in context.participants if participant.enabled]
+        test_result = next((item for item in tool_outputs if item.tool_id == "test_runner"), None)
+        acceptance_result = next((item for item in tool_outputs if item.tool_id == "acceptance_check"), None)
+        risk_result = next((item for item in tool_outputs if item.tool_id == "risk_matrix"), None)
+        has_script = any(str(item.details.get("path", "")).endswith("generated_script.py") for item in tool_outputs)
+        has_embedded_c = any(str(item.details.get("path", "")).endswith("embedded_app.c") for item in tool_outputs)
+        build_result = next((item for item in tool_outputs if item.tool_id == "build_runner"), None)
+        binary_result = next((item for item in tool_outputs if item.tool_id == "binary_runner"), None)
+        embedded_flow = has_embedded_c or any(keyword in f"{context.room_goal} {latest_text}" for keyword in ["嵌入式", "embedded", "gpio", "uart", "linux"])
+
+        def has_role(keyword: str) -> bool:
+            return any(keyword in role for role in available_roles)
+
+        if "产品" in role_name:
+            return ("架构师Agent", "需求边界已经补齐，应该让架构师先收敛方案。", False)
+        if "架构" in role_name and has_role("驱动") and any(keyword in latest_text for keyword in ["驱动", "bsp", "设备树", "gpio", "uart", "spi", "i2c"]):
+            return ("BSP与驱动Agent", "当前任务涉及板级与驱动约束，应该先让 BSP 与驱动角色确认边界。", False)
+        if "架构" in role_name and has_role("开发"):
+            return ("开发Agent", "方案已经清晰，下一步应由开发落地实现。", False)
+        if "驱动" in role_name and has_role("开发"):
+            return ("开发Agent", "板级约束已经明确，应该交给应用开发落实代码。", False)
+        if "开发" in role_name:
+            if (has_embedded_c or has_script) and has_role("构建"):
+                return ("构建发布Agent", "已经形成源码和构建文件，应该先完成构建。", False)
+            if has_script and has_role("测试"):
+                return ("测试Agent", "已经形成可执行脚本，应该立即进入验证。", False)
+            if has_role("文档"):
+                return ("文档Agent", "实现信息已经更新，可以同步补文档。", False)
+        if "构建" in role_name:
+            if build_result and bool(build_result.details.get("success")) and has_role("测试"):
+                return ("测试Agent", "构建成功，应该把二进制交给测试执行。", False)
+            if build_result and not bool(build_result.details.get("success", True)) and has_role("开发"):
+                return ("开发Agent", "构建失败，需要开发修复源码或构建脚本。", False)
+        if "测试" in role_name:
+            if has_role("日志") and any(keyword in latest_text for keyword in ["失败", "异常", "日志", "报错"]):
+                return ("日志分析Agent", "测试已经发现异常，应由日志分析角色先定位根因。", False)
+            if embedded_flow:
+                if binary_result and bool(binary_result.details.get("success")) and has_role("评审"):
+                    return ("评审Agent", "嵌入式程序已经真实运行成功，可以进入评审验收。", False)
+                if binary_result and not bool(binary_result.details.get("success", True)) and has_role("开发"):
+                    return ("开发Agent", "嵌入式程序尚未运行成功，需要继续修复。", False)
+                if build_result and not bool(build_result.details.get("success", True)) and has_role("开发"):
+                    return ("开发Agent", "构建仍未通过，需要开发继续修复。", False)
+            if test_result and bool(test_result.details.get("success")):
+                if has_role("安全") and any(keyword in latest_text for keyword in ["安全", "漏洞"]):
+                    return ("安全审计Agent", "功能测试通过后，应继续做安全检查。", False)
+                if has_role("评审"):
+                    return ("评审Agent", "测试通过后可以进入评审收口。", False)
+            if binary_result and bool(binary_result.details.get("success")) and has_role("评审"):
+                return ("评审Agent", "程序已经构建并运行成功，可以进入评审验收。", False)
+            if test_result and not bool(test_result.details.get("success", True)) and has_role("开发"):
+                return ("开发Agent", "测试失败，需要先回到开发修复。", False)
+            if binary_result and not bool(binary_result.details.get("success", True)) and has_role("开发"):
+                return ("开发Agent", "程序运行失败，需要继续修复。", False)
+        if "日志" in role_name:
+            if has_role("开发"):
+                return ("开发Agent", "日志已经指向根因，应该回到开发修复。", False)
+        if "安全" in role_name:
+            if risk_result and str(risk_result.details.get("level", "")).lower() in {"high", "critical"} and has_role("开发"):
+                return ("开发Agent", "安全检查发现高风险，需要开发优先修复。", False)
+            if has_role("运维"):
+                return ("运维Agent", "安全检查完成，应确认环境与交付条件。", False)
+        if "运维" in role_name:
+            if has_role("集成"):
+                return ("集成Agent", "环境确认后应继续检查集成链路。", False)
+            if has_role("评审"):
+                return ("评审Agent", "部署条件已具备，可以进入评审。", False)
+        if "集成" in role_name:
+            if has_role("文档"):
+                return ("文档Agent", "集成路径明确后应补充交付文档。", False)
+            if has_role("评审"):
+                return ("评审Agent", "集成检查完成，应进入评审。", False)
+        if "文档" in role_name and has_role("评审"):
+            return ("评审Agent", "文档已补齐，应由评审统一判断是否收口。", False)
+        if "数据" in role_name and has_role("产品"):
+            return ("产品专家Agent", "结果分析已完成，应回到产品确认验收口径。", False)
+        if "评审" in role_name:
+            all_closed = bool(context.tasks) and all(task.status in {TaskStatus.APPROVED, TaskStatus.DONE} for task in context.tasks)
+            looks_good = any(keyword in latest_text for keyword in ["完成", "通过", "没问题", "收口"]) or bool(acceptance_result and acceptance_result.details.get("accepted"))
+            if all_closed or looks_good:
+                return (None, "所有 agent 当前都认为问题已收敛，应该交由主持人决定继续还是结束。", True)
+            if has_role("开发"):
+                return ("开发Agent", "评审发现仍有未闭环事项，需要继续回到开发处理。", False)
+        return (None, "当前没有更合适的自动接力对象，建议主持人判断下一步。", True)
 
     def _architect_reply(self, goal: str, latest_text: str, active_tasks: list[TaskItem], tool_summary: str) -> str:
         task_hint = active_tasks[0].title if active_tasks else "先明确模块边界"
@@ -129,7 +251,7 @@ class LLMDrivenAgent(BaseAgent):
     def should_reply(self, context: AgentContext) -> bool:
         return RuleBasedAgent(self.participant).should_reply(context)
 
-    def generate_reply(self, context: AgentContext) -> str:
+    def plan_turn(self, context: AgentContext) -> AgentTurn:
         tool_outputs = execute_tools(self.participant.tools, self.participant.name, context.latest_message.content if context.latest_message else "", context.room_goal, context.workspace_dir)
         messages = self._build_messages(context)
         result = self.client.call(messages)
@@ -137,11 +259,20 @@ class LLMDrivenAgent(BaseAgent):
             merged = str(result["content"]).strip()
             if tool_outputs:
                 merged = f"{merged}\n\n工具执行：" + "；".join(item.summary for item in tool_outputs)
-            return merged
+            next_hint, handoff_reason, requires_moderator = RuleBasedAgent(self.participant)._choose_next_agent(context, tool_outputs)
+            merged = f"{merged}\n\n建议下一位：{'主持人' if requires_moderator else (next_hint or '主持人')}。原因：{handoff_reason}"
+            return AgentTurn(
+                reply_text=merged,
+                next_agent_hint=next_hint,
+                handoff_reason=handoff_reason,
+                requires_moderator=requires_moderator,
+                tool_outputs=tool_outputs,
+            )
 
-        fallback = RuleBasedAgent(self.participant).generate_reply(context)
+        fallback = RuleBasedAgent(self.participant).plan_turn(context)
         error_text = result.get("error", "unknown error")
-        return f"LLM 调用失败，已切换到本地策略。原因：{error_text}。{fallback}"
+        fallback.reply_text = f"LLM 调用失败，已切换到本地策略。原因：{error_text}。{fallback.reply_text}"
+        return fallback
 
     def _build_messages(self, context: AgentContext) -> list[dict[str, str]]:
         latest_text = context.latest_message.content if context.latest_message else ""
@@ -165,6 +296,7 @@ class LLMDrivenAgent(BaseAgent):
             "只在当前消息和你的职责相关时才回复。"
             "输出必须具体、可执行、简洁，不要写空话。"
             "如果需要推进，请给出明确的行动建议、责任人建议或验收点。"
+            "每次输出都必须判断下一位最适合接力的角色，或者明确交还主持人。"
             f" {self.participant.system_prompt}".strip()
         )
         user_prompt = (
@@ -175,7 +307,7 @@ class LLMDrivenAgent(BaseAgent):
             f"当前任务：\n{tasks_text}\n\n"
             f"相关长期记忆：\n{memory_text}\n\n"
             f"近期对话：\n{history_text}\n\n"
-            "请用你的角色身份给出下一条发言。"
+            "请用你的角色身份给出下一条发言，并显式说明建议下一位由谁接力。"
         )
         return [
             {"role": "system", "content": system_prompt},

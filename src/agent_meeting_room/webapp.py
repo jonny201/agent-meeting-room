@@ -78,7 +78,8 @@ def create_app(db_path: str | None = None) -> Flask:
     @app.get("/rooms/<room_id>/roles/new")
     def new_role(room_id: str) -> str:
         current_service = _service(app)
-        participant = Participant(
+        template_id = request.args.get("template_id", "")
+        participant = current_service.build_participant_from_template(template_id) if template_id else Participant(
             participant_id="new",
             name="",
             role="",
@@ -91,6 +92,8 @@ def create_app(db_path: str | None = None) -> Flask:
             room=current_service.get_room(room_id),
             participant=participant,
             tools=current_service.list_tools(),
+            role_templates=current_service.list_role_templates(),
+            selected_template_id=template_id,
             llm_profiles=current_service.list_llm_profiles(),
             is_new=True,
         )
@@ -106,6 +109,8 @@ def create_app(db_path: str | None = None) -> Flask:
             room=current_service.get_room(room_id),
             participant=participant,
             tools=current_service.list_tools(),
+            role_templates=current_service.list_role_templates(),
+            selected_template_id="",
             llm_profiles=current_service.list_llm_profiles(),
             is_new=False,
         )
@@ -149,13 +154,13 @@ def create_app(db_path: str | None = None) -> Flask:
         auto_ai = request.form.get("auto_ai") == "on"
         latest_message = current_service.post_message(room_id, sender_id, content)
         if auto_ai:
-            current_service.trigger_ai_discussion(room_id, latest_message)
+            current_service.drive_room_to_completion(room_id, latest_message)
         flash("消息已发送。", "success")
         return redirect(url_for("dashboard", room_id=room_id) + "#conversation")
 
     @app.post("/rooms/<room_id>/messages/trigger-ai")
     def trigger_ai(room_id: str) -> str:
-        _service(app).trigger_ai_discussion(room_id)
+        _service(app).drive_room_to_completion(room_id)
         flash("AI 角色已开始回应。", "success")
         return redirect(url_for("dashboard", room_id=room_id) + "#conversation")
 
@@ -169,13 +174,17 @@ def create_app(db_path: str | None = None) -> Flask:
             owner_id=request.form.get("owner_id", ""),
             acceptance_criteria=request.form.get("acceptance_criteria", ""),
         )
+        current_service.drive_room_to_completion(room_id)
         flash("任务已创建。", "success")
         return redirect(url_for("dashboard", room_id=room_id) + "#tasks")
 
     @app.post("/rooms/<room_id>/tasks/<task_id>/status")
     def update_task_status(room_id: str, task_id: str) -> str:
         status = TaskStatus(request.form.get("status", TaskStatus.PENDING.value))
-        _service(app).update_task_status(room_id, task_id, status)
+        current_service = _service(app)
+        current_service.update_task_status(room_id, task_id, status)
+        if status in {TaskStatus.REJECTED, TaskStatus.IN_PROGRESS, TaskStatus.PENDING}:
+            current_service.drive_room_to_completion(room_id)
         flash("任务状态已更新。", "success")
         return redirect(url_for("dashboard", room_id=room_id) + "#tasks")
 
